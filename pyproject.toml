@@ -1,0 +1,41 @@
+[project]
+name = "spotify-machine-learning-pipeline"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "duckdb>=1.5.0",
+    "numpy>=2.4.3",
+    "pandas>=3.0.1",
+    "pathlib>=1.0.1",
+    "pydantic-settings>=2.13.1",
+    "scikit-learn>=1.8.0",
+    "scipy>=1.17.1",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.2.0",
+    "jupyter>=1.1.1",
+    "ruff>=0.15.7",
+]
+
+[project.scripts]
+main = "src.main:main"
+
+[tool.uv]
+package = true
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "N",  # pep8-naming
+    "UP", # pyupgrade
+    "B",  # flake8-bugbear
+]
