@@ -1,7 +1,24 @@
+import atexit
+import json
+import logging.config
 from pathlib import Path
 
 from src.config import settings
 from src.database import SpotifyDB
+
+logger = logging.getLogger(__name__)  # __name__ is a common choice
+
+
+def setup_logging():
+    config_file = Path(settings.log_config)
+    with config_file.open() as f_in:
+        config = json.load(f_in)
+
+    logging.config.dictConfig(config)
+    queue_handler = logging.getHandlerByName("queue_handler")
+    if queue_handler is not None:
+        queue_handler.listener.start()
+        atexit.register(queue_handler.listener.stop)
 
 
 def run_pipeline() -> None:
@@ -14,7 +31,6 @@ def run_pipeline() -> None:
 
     # 2. Load (move) raw data to DuckDB instance
     db = SpotifyDB(data_dir=raw_data, db_path=settings.database_url, glob="*.json")
-    db.load()
 
     # 3. Run initial transformations
 
@@ -24,10 +40,11 @@ def run_pipeline() -> None:
 
 def main() -> None:
     """Main entry point."""
+    setup_logging()
     try:
         run_pipeline()
-    except Exception as e:
-        print(f"Encountered an error {e}")
+    except Exception:
+        logger.exception("Encountered an error during pipeline execution")
 
 
 if __name__ == "__main__":

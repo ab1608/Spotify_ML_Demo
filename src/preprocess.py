@@ -6,6 +6,8 @@ from requests import get as http_get
 
 from src.spotify import Spotify
 
+logger = logging.getLogger(__name__)
+
 month_to_season = {
     1: "Winter",
     2: "Winter",
@@ -21,10 +23,16 @@ month_to_season = {
     12: "Winter",
 }
 
+# Spotify enforces a rolling rate limit; ~180 req/min is a safe ceiling.
+# At 0.35s delay that's ~171 req/min, leaving a small buffer.
+_DEFAULT_REQUEST_DELAY: float = 0.35
+
 
 def create_features(data: pd.DataFrame) -> pd.DataFrame:
     if "timestamp" not in data:
-        raise pd.errors.DataError("`timestamp` column was not found.")
+        msg = f"Expected 'timestamp' column for feature extraction, but not found. Columns: {data.columns.tolist()}"
+        logger.error(msg)
+        raise pd.errors.DataError(msg)
 
     # Time features
     data = data.assign(
@@ -38,6 +46,7 @@ def create_features(data: pd.DataFrame) -> pd.DataFrame:
         season=data["timestamp"].dt.month.map(month_to_season),
         is_weekend=data["timestamp"].dt.day_of_week > 4,  # Monday=0, Sunday=6
     )
+
     data["time_of_day"] = (
         pd.cut(
             data["hour"],
@@ -50,15 +59,7 @@ def create_features(data: pd.DataFrame) -> pd.DataFrame:
     # User-behavior features
     data["did_skip"] = data["seconds"] < 3
 
-
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger(__name__)
-
-# Spotify enforces a rolling rate limit; ~180 req/min is a safe ceiling.
-# At 0.35s delay that's ~171 req/min, leaving a small buffer.
-_DEFAULT_REQUEST_DELAY: float = 0.35
+    return data
 
 
 def fetch_track_durations(
@@ -68,7 +69,8 @@ def fetch_track_durations(
     max_retries: int = 3,
     retry_backoff: float = 2.0,
 ) -> dict[str, int | None]:
-    """Fetch duration_ms for each track ID via GET /v1/tracks/{id}.
+    """
+    Fetch duration_ms for each track ID via GET /v1/tracks/{id}.
 
     Args:
         spotify: An authenticated Spotify instance.
@@ -83,6 +85,7 @@ def fetch_track_durations(
     Returns:
         A dict mapping each track_id to its duration in milliseconds,
         or None if the track could not be fetched after all retries.
+
     """
     results: dict[str, int | None] = {}
     total = len(track_ids)
@@ -97,7 +100,7 @@ def fetch_track_durations(
         for attempt in range(1, max_retries + 1):
             try:
                 headers = spotify.get_auth_header()
-                response = http_get(url, headers=headers)
+                response = http_get(url, headers=headers, timeout=10)
 
                 if response.status_code == 200:
                     data = response.json()
@@ -139,7 +142,7 @@ def fetch_track_durations(
                     delay *= retry_backoff
 
             except Exception as exc:
-                logger.error(
+                logger.exception(
                     "[%d/%d] %s — exception on attempt %d/%d: %s",
                     idx,
                     total,
@@ -190,6 +193,6 @@ if __name__ == "__main__":
     for track_id, duration_ms in durations.items():
         if duration_ms is not None:
             minutes, seconds = divmod(duration_ms // 1000, 60)
-            print(f"{track_id}: {minutes}:{seconds:02d}")
+            logger.info(f"{track_id}: {minutes}:{seconds:02d}")
         else:
-            print(f"{track_id}: FAILED")
+            logger.warning(f"{track_id}: FAILED")

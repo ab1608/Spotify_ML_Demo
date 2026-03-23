@@ -13,6 +13,10 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Project specific ignores
+logs/error.log.jsonl
+data/
+
 # C extensions
 *.so
 
