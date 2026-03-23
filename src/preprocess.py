@@ -1,10 +1,11 @@
+import json
 import logging
 import time
 
 import pandas as pd
-from requests import get as http_get
 
-from src.spotify import Spotify
+from spotify_handler import SpotifyHandler
+from src.config import project_io
 
 logger = logging.getLogger(__name__)
 
@@ -23,12 +24,8 @@ month_to_season = {
     12: "Winter",
 }
 
-# Spotify enforces a rolling rate limit; ~180 req/min is a safe ceiling.
-# At 0.35s delay that's ~171 req/min, leaving a small buffer.
-_DEFAULT_REQUEST_DELAY: float = 0.35
 
-
-def create_features(data: pd.DataFrame) -> pd.DataFrame:
+def create_user_features(data: pd.DataFrame) -> pd.DataFrame:
     if "timestamp" not in data:
         msg = f"Expected 'timestamp' column for feature extraction, but not found. Columns: {data.columns.tolist()}"
         logger.error(msg)
@@ -46,35 +43,55 @@ def create_features(data: pd.DataFrame) -> pd.DataFrame:
         season=data["timestamp"].dt.month.map(month_to_season),
         is_weekend=data["timestamp"].dt.day_of_week > 4,  # Monday=0, Sunday=6
     )
-
-    data["time_of_day"] = (
-        pd.cut(
+    # Additional features
+    data = data.assign(
+        tie_of_day=pd.cut(
             data["hour"],
             [0, 6, 12, 18, 24],
             right=False,
             labels=["Night", "Morning", "Afternoon", "Evening"],
         ),
+        did_skip=data["seconds"] < 3,
     )
 
-    # User-behavior features
-    data["did_skip"] = data["seconds"] < 3
+    return data
+
+
+def get_audio_features(sp: SpotifyHandler, data: pd.DataFrame) -> pd.DataFrame:
+    if "track_uri" not in data:
+        msg = f"Expected 'track_uri' column for feature extraction, but not found. Columns: {data.columns.tolist()}"
+        logger.error(msg)
+        raise pd.errors.DataError(msg)
+
+    # Extract unique track URIs to minimize redundant API calls
+    data["track_uri"] = data["track_uri"].astype(str)  # Ensure URIs are strings
+    # Remove "spotify:track:" prefix if present to get just the ID for API calls
+    data["track_uri"] = data["track_uri"].str.replace("spotify:track:", "", regex=False)
+    unique_tracks = data["track_uri"].unique().tolist()
+    logger.info(
+        "Extracted %d unique track URIs for feature fetching.", len(unique_tracks)
+    )
+    track_durations = fetch_track_durations(sp, unique_tracks)
+
+    # Map durations back to the original DataFrame
+    data["duration_ms"] = data["track_uri"].map(track_durations)
 
     return data
 
 
 def fetch_track_durations(
-    spotify: Spotify,
-    track_ids: list[str],
-    request_delay: float = _DEFAULT_REQUEST_DELAY,
+    spotify: SpotifyHandler,
+    track_uris: list[str],
+    request_delay: float = 0.35,
     max_retries: int = 3,
     retry_backoff: float = 2.0,
 ) -> dict[str, int | None]:
     """
-    Fetch duration_ms for each track ID via GET /v1/tracks/{id}.
+    Fetch duration_ms for each track URI via GET /v1/tracks/{id}.
 
     Args:
         spotify: An authenticated Spotify instance.
-        track_ids: List of Spotify track IDs to look up.
+        track_uris: List of Spotify track URIs to look up.
         request_delay: Seconds to wait between successful requests.
             Default is 0.35s (~171 req/min), safely under Spotify's limit.
         max_retries: How many times to retry a failed request before
@@ -83,88 +100,57 @@ def fetch_track_durations(
             consecutive retry for the same track.
 
     Returns:
-        A dict mapping each track_id to its duration in milliseconds,
+        A dict mapping each track_uri to its duration in milliseconds,
         or None if the track could not be fetched after all retries.
 
     """
+    # Check if we have a cached result from a previous run to avoid unnecessary API calls
+    track_duration_cache = project_io.processed_data / "track_durations_cache.json"
+    if track_duration_cache.exists():
+        with track_duration_cache.open() as f_in:
+            cached_durations = json.load(f_in)
+        # Remove already cached tracks from the list to fetch
+        track_uris = [uri for uri in track_uris if uri not in cached_durations]
+        logger.info(
+            "Loaded durations for %d tracks from cache. %d tracks remain to fetch.",
+            len(cached_durations),
+            len(track_uris),
+        )
     results: dict[str, int | None] = {}
-    total = len(track_ids)
+    total = len(track_uris)
 
     logger.info("Fetching durations for %d tracks (one request each).", total)
 
-    for idx, track_id in enumerate(track_ids, start=1):
-        url = f"https://api.spotify.com/v1/tracks/{track_id}"
-        delay = request_delay
-        duration_ms: int | None = None
-
+    for idx, track_uri in enumerate(track_uris, start=1):
         for attempt in range(1, max_retries + 1):
-            try:
-                headers = spotify.get_auth_header()
-                response = http_get(url, headers=headers, timeout=10)
-
-                if response.status_code == 200:
-                    data = response.json()
-                    duration_ms = data.get("duration_ms")
-                    break
-
-                elif response.status_code == 429:
-                    retry_after = int(response.headers.get("Retry-After", delay))
-                    logger.warning(
-                        "[%d/%d] %s — rate limited. Waiting %ds (attempt %d/%d).",
-                        idx,
-                        total,
-                        track_id,
-                        retry_after,
-                        attempt,
-                        max_retries,
-                    )
-                    time.sleep(retry_after)
-                    delay *= retry_backoff
-
-                elif response.status_code == 401:
-                    logger.info(
-                        "[%d/%d] %s — token expired, refreshing.", idx, total, track_id
-                    )
-                    spotify.token = spotify.get_token()
-                    # Don't sleep or increment backoff; just retry immediately.
-
-                else:
-                    logger.warning(
-                        "[%d/%d] %s — HTTP %d on attempt %d/%d.",
-                        idx,
-                        total,
-                        track_id,
-                        response.status_code,
-                        attempt,
-                        max_retries,
-                    )
-                    time.sleep(delay)
-                    delay *= retry_backoff
-
-            except Exception as exc:
-                logger.exception(
-                    "[%d/%d] %s — exception on attempt %d/%d: %s",
+            track_data = spotify.get_track(track_uri)
+            if track_data and "duration_ms" in track_data:
+                duration_ms = track_data["duration_ms"]
+                logger.info(
+                    "[%d/%d] %s — fetched duration %d ms on attempt %d.",
                     idx,
                     total,
-                    track_id,
+                    track_uri,
+                    duration_ms,
+                    attempt,
+                )
+                results[track_uri] = duration_ms
+                time.sleep(request_delay)  # Wait before next request
+                break  # Exit retry loop on success
+
+            if track_data is None:
+                logger.warning(
+                    "[%d/%d] %s — rate limited or other error on attempt %d/%d.",
+                    idx,
+                    total,
+                    track_uri,
                     attempt,
                     max_retries,
-                    exc,
                 )
-                time.sleep(delay)
-                delay *= retry_backoff
-
-        if duration_ms is None:
-            logger.error(
-                "[%d/%d] %s — giving up after %d retries.",
-                idx,
-                total,
-                track_id,
-                max_retries,
-            )
-
-        results[track_id] = duration_ms
-        time.sleep(request_delay)
+                results[track_uri] = None
+                time.sleep(
+                    request_delay * retry_backoff ** (attempt - 1)
+                )  # Wait before retrying
 
     failed = [tid for tid, dur in results.items() if dur is None]
     if failed:
@@ -172,27 +158,8 @@ def fetch_track_durations(
     else:
         logger.info("All %d tracks fetched successfully.", total)
 
+    # Append new results to cache file for future runs
+    with track_duration_cache.open("a") as f_out:
+        json.dump(results, f_out, indent=2)
+
     return results
-
-
-# --- Example usage ---
-if __name__ == "__main__":
-    CLIENT_ID = "your_client_id"
-    CLIENT_SECRET = "your_client_secret"
-
-    # Replace with your actual list of track IDs
-    track_ids: list[str] = [
-        "11dFghVXANMlKmJXsNCbNl",
-        "2TpxZ7JUBn3uw46aR7qd6V",
-        # ... rest of your IDs
-    ]
-
-    sp = Spotify(CLIENT_ID, CLIENT_SECRET)
-    durations = fetch_track_durations(sp, track_ids)
-
-    for track_id, duration_ms in durations.items():
-        if duration_ms is not None:
-            minutes, seconds = divmod(duration_ms // 1000, 60)
-            logger.info(f"{track_id}: {minutes}:{seconds:02d}")
-        else:
-            logger.warning(f"{track_id}: FAILED")

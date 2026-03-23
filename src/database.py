@@ -58,6 +58,7 @@ class SpotifyDB:
         glob: str = "*.json",
         db_path: str = ":memory:",
     ) -> None:
+
         self.data_dir = Path(data_dir)
         self.glob = glob
         self._con = duckdb.connect(db_path)
@@ -157,6 +158,22 @@ class SpotifyDB:
 
         """
         return self._con.execute(sql)
+
+    def insert_table(self, df: DataFrame, table_name: str) -> None:
+        """
+        Insert a DataFrame into the DuckDB instance as a new table.
+
+        Args:
+            df (pd.DataFrame): The DataFrame to insert.
+            table_name (str): The name of the new table to create in DuckDB.
+            force (bool, optional): If True, overwrite the table if it exists. Defaults to False.
+
+        """
+        self._con.register("temp_df", df)
+        self._con.execute(
+            f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM temp_df"
+        )
+        self._con.unregister("temp_df")
 
     def schema(self) -> None:
         """Display the ``streams`` table schema."""

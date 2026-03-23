@@ -14,6 +14,7 @@ __pycache__/
 *$py.class
 
 # Project specific ignores
+logs/error.log.jsonl.*
 logs/error.log.jsonl
 data/
 
