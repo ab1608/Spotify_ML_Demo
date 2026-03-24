@@ -19,6 +19,7 @@ dev = [
     "ipykernel>=7.2.0",
     "jupyter>=1.1.1",
     "ruff>=0.15.7",
+    "ty>=0.0.24",
 ]
 
 [project.scripts]
@@ -63,5 +64,6 @@ ignore = [
     "TD002",
     "TD003",
     "FIX002", # too verbose descriptions of todos
-    "PLR2004", 
+    "PLR2004",
+    "S608",   # SQL injection
 ]
