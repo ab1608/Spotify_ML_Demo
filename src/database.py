@@ -1,41 +1,17 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import duckdb
 
 logger = logging.getLogger(__name__)
 
-_COLUMN_ALIASES: dict[str, str] = {
-    "ts": "timestamp",
-    "platform": "platform",
-    "ms_played": "ms_played",
-    "conn_country": "country",
-    "ip_addr": "ip_address",
-    "master_metadata_track_name": "track_name",
-    "master_metadata_album_artist_name": "artist_name",
-    "master_metadata_album_album_name": "album_name",
-    "spotify_track_uri": "track_uri",
-    "episode_name": "episode_name",
-    "episode_show_name": "episode_show_name",
-    "spotify_episode_uri": "episode_uri",
-    "audiobook_title": "audiobook_title",
-    "audiobook_uri": "audiobook_uri",
-    "audiobook_chapter_uri": "audiobook_chapter_uri",
-    "audiobook_chapter_title": "audiobook_chapter_title",
-    "reason_start": "reason_start",
-    "reason_end": "reason_end",
-    "shuffle": "shuffle",
-    "skipped": "skipped",
-    "offline": "offline",
-    "offline_timestamp": "offline_timestamp",
-    "incognito_mode": "incognito_mode",
-}
 
-_SELECT_CLAUSE = ",\n    ".join(
-    f'"{raw}" AS {alias}' for raw, alias in _COLUMN_ALIASES.items()
-)
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from pandas import DataFrame
 
 
 class SpotifyDB:
@@ -54,94 +30,115 @@ class SpotifyDB:
 
     def __init__(
         self,
-        data_dir: str | Path = "data",
-        glob: str = "*.json",
         db_path: str = ":memory:",
     ) -> None:
 
-        self.data_dir = Path(data_dir)
-        self.glob = glob
         self._con = duckdb.connect(db_path)
 
-    _PROCESSED_LOG_TABLE = "ingested_files"
-
-    def _track_processed_files(self) -> None:
-        """Create a table used to track files that have been ingested."""
-        self._con.execute(f"""
-            CREATE TABLE IF NOT EXISTS {self._PROCESSED_LOG_TABLE} (
-                filename TEXT PRIMARY KEY,
-                ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-    def _get_new_files(self, data_files: list[Path]) -> list[Path]:
+    def _check_table_exists(self, table_name: str) -> bool:
         """
-        Return only files that are not present in the ingestion log.
+        Check if a table already exists in the database.
 
         Args:
-            data_files (list[Path]): Candidate files discovered on disk.
+            table_name (str): Table to check for existence.
 
         Returns:
-            list[Path]: Files that have not been recorded as processed.
+            bool: True if the table exists, False otherwise.
 
         """
-        processed = self._con.execute(
-            f"SELECT filename FROM {self._PROCESSED_LOG_TABLE}"
-        ).fetchall()
-        processed_set = {row[0] for row in processed}
-        return [f for f in data_files if f.name not in processed_set]
+        existing_tables = self._con.execute("SHOW TABLES").fetchall()
+        existing_table_names = {table[0] for table in existing_tables}
+        return table_name in existing_table_names
 
-    def load(self) -> SpotifyDB:
+    def _import_file(self, file_path: Path, table_name: str, glob: str | None = None) -> None:
         """
-        Discover JSON files and load them into the ``streams`` table.
+        Import a JSON, CSV or Parquet file or directory of files to the `table_name`.
 
-        Returns:
-            SpotifyDB: The current instance for method chaining.
+        Args:
+            file_path (Path): The path to a single file or a directory containing files to import.
+            If a directory is provided, the `glob` parameter will be used to match files within that directory.
+            table_name (str): The name of the table to create or replace with the imported data.
+            glob(str | None): The glob pattern to match files (e.g., "*.json").
+            If multiple files match the glob, they will be imported together.
 
         Raises:
-            FileNotFoundError: If no matching files are found in ``data_dir``.
+            ValueError: If the file extension is not supported.
 
         """
-        self._track_processed_files()
-        data_files = self.data_dir.glob(self.glob)
+        if glob:
+            if file_path.is_dir():
+                file_path = file_path / glob
+            else:
+                msg = f"Provided file_path {file_path} is not a directory, but a glob pattern {glob} was provided. Please provide a directory path when using glob patterns."
+                raise ValueError(msg)
 
-        if not data_files:
-            msg = f"Did not find any files in {self.data_dir} matching the glob expression {self.glob}"
-            raise FileNotFoundError(msg)
+        file_extension = file_path.suffix.lower()
 
-        files_to_process: list[Path] = self._get_new_files(data_files)
-        if not files_to_process:
-            row_count = self._con.execute("SELECT COUNT(*) FROM streams").fetchone()[0]
-            logger.info(
-                "No new files to load. Database `streams` table currently contains %d rows.",
-                row_count,
-            )
-            return self
+        if file_extension == ".json":
+            read_command = f"""
+                CREATE OR REPLACE TABLE {table_name} AS
+                SELECT
+                   *
+                FROM read_json_auto(
+                    ?,
+                    maximum_object_size = 33554432,
+                    union_by_name       = true,
+                    filename            = false
+                )
+            """
+        elif file_extension == ".csv":
+            read_command = f"""
+                CREATE OR REPLACE TABLE {table_name} AS
+                SELECT
+                   *
+                FROM read_csv(?, union_by_name = true)
+            """
+        elif file_extension == ".parquet":
+            read_command = f"""
+                CREATE OR REPLACE TABLE {table_name} AS
+                SELECT
+                   *
+                FROM read_parquet(?)
+            """
+        else:
+            msg = f"Unsupported file extension: {file_extension}. Supported extensions are .json, .csv, .parquet"
+            raise ValueError(msg)
 
-        # Build a comma-separated quoted glob that DuckDB can read in one shot.
-        pattern = str(self.data_dir / self.glob).replace("\\", "/")
+        self._con.execute(read_command, [str(file_path)])
 
-        create_table = f"""
-            CREATE OR REPLACE TABLE streams AS
-            SELECT
-                {_SELECT_CLAUSE}
-            FROM read_json_auto(
-                ?,
-                maximum_object_size = 33554432,
-                union_by_name       = true,
-                filename            = false
-            )
+        # Check how many
+        # rows were imported and log a warning if the table is empty
+        row_count = self._con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+        if row_count == 0:
+            logger.warning("Table %s is empty after import.", table_name)
+        else:
+            logger.info("Imported %d rows into table %s.", row_count, table_name)
+
+    def import_data(
+        self,
+        file_path: Path,
+        target_table: str,
+        glob: str | None = None,
+        *,
+        force: bool = False,
+    ) -> None:
         """
+        Import data from a file or directory into a DuckDB table.
 
-        self._con.execute(create_table, [pattern])
-        row_count = self._con.execute("SELECT COUNT(*) FROM streams").fetchone()[0]
-        for fp in files_to_process:
-            self._con.execute(
-                f"INSERT INTO {self._PROCESSED_LOG_TABLE} (filename) VALUES (?)",
-                [fp.name],
-            )
-        logger.info("Loading %d rows.", row_count)
-        return self
+        Args:
+            file_path (Path): The path to the file or directory to import.
+            target_table (str): The name of the target table in DuckDB.
+            glob (str | None): Optional glob pattern to match files if `file_path` is a directory.
+            force (bool): If True, overwrite the target table if it already exists. Defaults to False.
+
+        """
+        if not force and self._check_table_exists(target_table):
+            msg = f"Table '{target_table}' already exists. Use force=True to overwrite it."
+            # Don't raise an exception, just let the user know and skip the import
+            logger.warning(msg)
+            return
+
+        self._import_file(file_path, target_table, glob)
 
     def query(self, sql: str) -> duckdb.DuckDBPyConnection:
         """
@@ -159,7 +156,7 @@ class SpotifyDB:
         """
         return self._con.execute(sql)
 
-    def insert_table(self, df: DataFrame, table_name: str) -> None:
+    def insert_table(self, df: DataFrame, table_name: str, *, force: bool = False) -> None:
         """
         Insert a DataFrame into the DuckDB instance as a new table.
 
@@ -169,10 +166,12 @@ class SpotifyDB:
             force (bool, optional): If True, overwrite the table if it exists. Defaults to False.
 
         """
+        if not force and self._check_table_exists(table_name):
+            msg = f"Table '{table_name}' already exists. Use force=True to overwrite it."
+            raise ValueError(msg)
+
         self._con.register("temp_df", df)
-        self._con.execute(
-            f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM temp_df"
-        )
+        self._con.execute(f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM temp_df")
         self._con.unregister("temp_df")
 
     def schema(self) -> None:

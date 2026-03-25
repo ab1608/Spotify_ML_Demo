@@ -55,9 +55,7 @@ class SpotifyHandler:
             return res.json()
 
         if res.status_code == 401:
-            logger.warning(
-                "[%d/%d] %s — token expired.", res.status_code, res.reason, res.text
-            )
+            logger.warning("[%d/%d] %s — token expired.", res.status_code, res.reason, res.text)
         else:
             logger.warning(
                 "[%d/%d] %s — Spotify responded with %d",
@@ -87,7 +85,7 @@ class SpotifyHandler:
         result = get(url, headers=header, timeout=self.timeout)
         return self.check_response(result)
 
-    def search_item(self, item: str, type: str, limit: int):
+    def search_item(self, item: str, item_type: str, limit: int):
         """
         Get Spotify catalog information about albums, artists, playlists,
         tracks, shows, episodes or audiobooks that match a keyword string.
@@ -95,7 +93,7 @@ class SpotifyHandler:
         New Zealand and Australia markets
         Args:
             item (str): The search query's keywords. For example: "Muse" or "Muse Starlight".
-            type (str): The type of item to search for. One of: "album", "artist", "playlist", "track", "show", "episode", or "audiobook".
+            item_type (str): The type of item to search for. One of: "album", "artist", "playlist", "track", "show", "episode", or "audiobook".
             limit (int):  The maximum number of results to return. Must be a positive integer between 1 and 50.
 
         Returns:
@@ -103,7 +101,7 @@ class SpotifyHandler:
 
         """
         url: str = "https://api.spotify.com/v1/search"
-        query: str = f"?q={item}&type={type}&limit={limit}"
+        query: str = f"?q={item}&type={item_type}&limit={limit}"
         query_url: str = f"{url}{query}"
         headers = self.get_auth_header()
         result = get(query_url, headers=headers, timeout=self.timeout)

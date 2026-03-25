@@ -29,7 +29,7 @@ main = "src.main:main"
 package = true
 
 [tool.ruff]
-line-length = 88
+line-length = 100
 target-version = "py312"
 select = [
     "ALL", # include all the rules, including new ones

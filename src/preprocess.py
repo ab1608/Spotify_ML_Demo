@@ -68,9 +68,7 @@ def get_audio_features(sp: SpotifyHandler, data: pd.DataFrame) -> pd.DataFrame:
     # Remove "spotify:track:" prefix if present to get just the ID for API calls
     data["track_uri"] = data["track_uri"].str.replace("spotify:track:", "", regex=False)
     unique_tracks = data["track_uri"].unique().tolist()
-    logger.info(
-        "Extracted %d unique track URIs for feature fetching.", len(unique_tracks)
-    )
+    logger.info("Extracted %d unique track URIs for feature fetching.", len(unique_tracks))
     track_durations = fetch_track_durations(sp, unique_tracks)
 
     # Map durations back to the original DataFrame
@@ -148,9 +146,7 @@ def fetch_track_durations(
                     max_retries,
                 )
                 results[track_uri] = None
-                time.sleep(
-                    request_delay * retry_backoff ** (attempt - 1)
-                )  # Wait before retrying
+                time.sleep(request_delay * retry_backoff ** (attempt - 1))  # Wait before retrying
 
     failed = [tid for tid, dur in results.items() if dur is None]
     if failed:

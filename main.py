@@ -2,10 +2,9 @@ import atexit
 import json
 import logging.config
 
-from spotify_handler import SpotifyHandler
 from src.config import project_io, secrets
 from src.database import SpotifyDB
-from src.preprocess import create_user_features, get_audio_features
+from src.preprocess import create_user_features
 
 logger = logging.getLogger(__name__)  # __name__ is a common choice
 
@@ -29,19 +28,32 @@ def run_pipeline() -> None:
     # so we do not have to do our own extraction from any source system
 
     # 2. Load (move) raw data to DuckDB instance
-    db = SpotifyDB(
-        data_dir=project_io.raw_data, db_path=secrets.database_url, glob="*.json"
+    db = SpotifyDB(db_path=secrets.database_url)
+
+    # Spotify exported data
+    db.import_data(
+        file_path=project_io.raw_data,
+        glob="*.json",
+        target_table="streams",
+        force=False,
     )
 
-    # 3. Create user features
+    # Audio features downloaded from Kaggle
+    db.import_data(
+        file_path=project_io.raw_data / "audio_features.csv",
+        target_table="audio_features",
+        force=True,
+    )
+
+    # Note: In a real-world scenario, we would have extracted the audio features
+    # from an API but for the sake of this simple project, we downloaded it from Kaggle.
+    # See the src/spotify.py file for how this may have been accomplished otherwise.
+
+    # 3. Feature engineering
+
+    # User features
     df = db.query("SELECT * FROM streams").df()
     df = create_user_features(df)
-
-    # 4. Get audio features for all unique tracks in the dataset
-    sp = SpotifyHandler(
-        client_id=secrets.spotify_client_id, client_secret=secrets.spotify_client_secret
-    )
-    df = get_audio_features(sp, df)
 
     # 5. Store the enriched dataset back to DuckDB for future use
     db.insert_table(df, "enriched_streams")
