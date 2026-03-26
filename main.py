@@ -2,7 +2,10 @@ import atexit
 import json
 import logging.config
 
-from src.config import project_io, secrets
+from IPython.utils.decorators import F
+from numpy.f2py.crackfortran import c
+
+from src.config import SPOTIFY_EXPORT_COLUMN_ALIASES, project_io, secrets
 from src.database import SpotifyDB
 from src.preprocess import create_user_features
 
@@ -29,7 +32,6 @@ def run_pipeline() -> None:
 
     # 2. Load (move) raw data to DuckDB instance
     db = SpotifyDB(db_path=secrets.database_url)
-
     # Spotify exported data
     db.import_data(
         file_path=project_io.raw_data,
@@ -42,7 +44,7 @@ def run_pipeline() -> None:
     db.import_data(
         file_path=project_io.raw_data / "audio_features.csv",
         target_table="audio_features",
-        force=True,
+        force=False,
     )
 
     # Note: In a real-world scenario, we would have extracted the audio features
@@ -52,11 +54,28 @@ def run_pipeline() -> None:
     # 3. Feature engineering
 
     # User features
-    df = db.query("SELECT * FROM streams").df()
-    df = create_user_features(df)
+    # Let's use the column aliases to select the columns in the `streams` table
+    streams = (
+        db.query("SELECT * FROM streams")
+        .df()
+        .assign(
+            track_id=lambda df: df["spotify_track_uri"].str.split(":").str[-1]
+        )  # last part of the URI is the track ID
+        .rename(columns=SPOTIFY_EXPORT_COLUMN_ALIASES)
+    )
+    streams = create_user_features(streams)
+
+    audio_features = db.query("SELECT * FROM audio_features").df()
+    streams = streams.merge(
+        audio_features,
+        left_on="track_id",
+        right_on="id",
+        how="left",
+        suffixes=("_stream", "_audio"),
+    )
 
     # 5. Store the enriched dataset back to DuckDB for future use
-    db.insert_table(df, "enriched_streams")
+    db.insert_table(streams, "enriched_streams", force=False)
 
     # Close database
     db.close()
