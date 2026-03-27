@@ -45,7 +45,7 @@ def create_user_features(data: pd.DataFrame) -> pd.DataFrame:
     )
     # Additional features
     data = data.assign(
-        tie_of_day=pd.cut(
+        time_of_day=pd.cut(
             data["hour"],
             [0, 6, 12, 18, 24],
             right=False,
